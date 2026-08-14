@@ -1,11 +1,16 @@
 """Pygame-ce front end for the sudoku solver."""
 
+import pathlib
 import random
 import sys
 
 import pygame
 
 from . import logic
+
+PUZZLE_DIR = pathlib.Path(__file__).resolve().parent.parent / "puzzles"
+PUZZLE_EXT = ".sdk"
+AUTO_DELAY = 3000  # ms a found cell stays up before <auto search> moves on
 
 CELL = 60
 GRID = CELL * logic.SIZE
@@ -30,6 +35,8 @@ BTN_HOVER = (214, 218, 212)
 BTN_EDGE = (120, 124, 120)
 BTN_OFF = (240, 240, 238)
 PAD_BG = (252, 252, 250)
+RESET_BG = (228, 228, 224)
+SHADOW = (215, 215, 210)
 
 
 class Button:
@@ -98,6 +105,113 @@ class NumPad:
             surf.blit(label, label.get_rect(center=inner.center))
 
 
+class FileDialog:
+    """Modal panel listing saved puzzles; also takes a name when saving."""
+
+    W, H = 430, 410
+    ROW = 26
+
+    def __init__(self, kind, files, name=""):
+        self.kind = kind  # "load" or "save"
+        self.files = files
+        self.name = name
+        self.suggested = bool(name)  # first keystroke replaces the offered name
+        self.selected = None
+        self.scroll = 0
+        self.rect = pygame.Rect(0, 0, self.W, self.H)
+        self.rect.center = (WIDTH // 2, HEIGHT // 2)
+        top = self.rect.y + (78 if kind == "save" else 44)
+        self.list_rect = pygame.Rect(
+            self.rect.x + 14, top, self.W - 28, self.rect.bottom - 52 - top
+        )
+        self.name_rect = pygame.Rect(self.rect.x + 14, self.rect.y + 40, self.W - 28, 30)
+        self.ok_rect = pygame.Rect(self.rect.right - 210, self.rect.bottom - 44, 92, 32)
+        self.cancel_rect = pygame.Rect(self.rect.right - 106, self.rect.bottom - 44, 92, 32)
+
+    @property
+    def visible(self):
+        return max(1, self.list_rect.height // self.ROW)
+
+    def rows(self):
+        for n, path in enumerate(self.files[self.scroll : self.scroll + self.visible]):
+            yield path, pygame.Rect(
+                self.list_rect.x, self.list_rect.y + n * self.ROW,
+                self.list_rect.width, self.ROW,
+            )
+
+    def scroll_by(self, amount):
+        top = max(0, len(self.files) - self.visible)
+        self.scroll = min(max(0, self.scroll + amount), top)
+
+    def hit(self, pos):
+        """('pick', path) | ('ok',) | ('cancel',) | None -- None keeps it open."""
+        if self.ok_rect.collidepoint(pos):
+            return ("ok",)
+        if self.cancel_rect.collidepoint(pos) or not self.rect.collidepoint(pos):
+            return ("cancel",)
+        for path, rect in self.rows():
+            if rect.collidepoint(pos):
+                self.selected = path
+                self.name = path.stem
+                self.suggested = False
+                return ("pick", path)
+        return None
+
+    def on_key(self, event):
+        if self.kind != "save":
+            return
+        if event.key == pygame.K_BACKSPACE:
+            self.name = "" if self.suggested else self.name[:-1]
+        elif event.unicode and event.unicode.isprintable():
+            self.name = ("" if self.suggested else self.name) + event.unicode
+        else:
+            return
+        self.suggested = False
+
+    def draw(self, surf, font, small, mouse):
+        pygame.draw.rect(surf, SHADOW, self.rect.move(4, 4), border_radius=10)
+        pygame.draw.rect(surf, PAD_BG, self.rect, border_radius=10)
+        pygame.draw.rect(surf, BTN_EDGE, self.rect, width=2, border_radius=10)
+        title = "save problem as" if self.kind == "save" else "load problem"
+        surf.blit(font.render(title, True, TEXT), (self.rect.x + 14, self.rect.y + 12))
+
+        if self.kind == "save":
+            pygame.draw.rect(surf, (255, 255, 255), self.name_rect, border_radius=5)
+            pygame.draw.rect(surf, BTN_EDGE, self.name_rect, width=1, border_radius=5)
+            caret = self.name + "_"
+            label = font.render(caret + PUZZLE_EXT, True, THIN if self.suggested else TEXT)
+            surf.blit(label, (self.name_rect.x + 8, self.name_rect.y + 6))
+
+        pygame.draw.rect(surf, (255, 255, 255), self.list_rect, border_radius=5)
+        pygame.draw.rect(surf, BTN_EDGE, self.list_rect, width=1, border_radius=5)
+        if not self.files:
+            surf.blit(
+                small.render("no saved puzzles yet", True, THIN),
+                (self.list_rect.x + 8, self.list_rect.y + 8),
+            )
+        for path, rect in self.rows():
+            inner = rect.inflate(-4, -2)
+            if path == self.selected:
+                pygame.draw.rect(surf, SEL_BG, inner, border_radius=4)
+            elif rect.collidepoint(mouse):
+                pygame.draw.rect(surf, BTN_HOVER, inner, border_radius=4)
+            surf.blit(small.render(path.name, True, TEXT), (inner.x + 6, inner.y + 4))
+        if len(self.files) > self.visible:
+            more = "%d-%d of %d  (mouse wheel)" % (
+                self.scroll + 1,
+                min(self.scroll + self.visible, len(self.files)),
+                len(self.files),
+            )
+            surf.blit(small.render(more, True, THIN), (self.list_rect.x, self.list_rect.bottom + 4))
+
+        for rect, label in ((self.ok_rect, self.kind), (self.cancel_rect, "cancel")):
+            color = BTN_HOVER if rect.collidepoint(mouse) else BTN
+            pygame.draw.rect(surf, color, rect, border_radius=6)
+            pygame.draw.rect(surf, BTN_EDGE, rect, width=1, border_radius=6)
+            glyph = font.render(label, True, TEXT)
+            surf.blit(glyph, glyph.get_rect(center=rect.center))
+
+
 class App:
     def __init__(self):
         pygame.init()
@@ -110,13 +224,18 @@ class App:
         self.rng = random.Random()
 
         self.grid = logic.empty_grid()
+        self.problem = None  # the puzzle as it was before any solving
         self.givens = set()
         self.placed = set()
+        self.reverted = set()  # emptied by <reset>, drawn grey until the next move
         self.mode = "idle"
         self.pad = None
+        self.dialog = None
         self.selected = None
         self.step = None
         self.reason = ()
+        self.auto = False
+        self.auto_at = 0
         self.message = "Edit a problem or generate a random one."
         self.buttons = []
         self.running = True
@@ -124,36 +243,45 @@ class App:
 
     # ---------------------------------------------------------------- layout
     def rebuild_buttons(self):
+        auto_label = "stop auto" if self.auto else "auto search"
         defs = {
             "idle": [
                 ("edit", self.start_edit),
                 ("generate random", self.generate),
                 ("solve", self.start_solve),
+                ("load", self.open_load),
+                ("save", self.open_save),
                 ("clear board", self.clear_board),
                 ("quit", self.quit),
             ],
             "edit": [
                 ("done", self.finish_edit),
                 ("clear board", self.clear_board),
+                ("load", self.open_load),
                 ("quit", self.quit),
             ],
             "solving": [
                 ("next search", self.next_search),
-                ("abort", self.abort),
+                (auto_label, self.toggle_auto),
+                ("reset", self.reset),
+                ("save", self.open_save),
                 ("quit", self.quit),
             ],
             "stuck": [
                 ("user solve", self.start_user_solve),
-                ("abort", self.abort),
+                ("reset", self.reset),
+                ("save", self.open_save),
                 ("quit", self.quit),
             ],
             "usersolve": [
                 ("done", self.finish_user_solve),
-                ("abort", self.abort),
+                ("reset", self.reset),
                 ("quit", self.quit),
             ],
             "finish": [
-                ("new problem", self.abort),
+                ("reset", self.reset),
+                ("save", self.open_save),
+                ("clear board", self.clear_board),
                 ("quit", self.quit),
             ],
         }[self.mode]
@@ -161,13 +289,13 @@ class App:
         y = MARGIN_Y
         for label, action in defs:
             self.buttons.append(Button((PANEL_X, y, 200, 44), label, action))
-            y += 54
-        if self.mode == "solving" and self.step is None:
-            self.buttons[0].enabled = False
+            y += 48
 
     def set_mode(self, mode):
         self.mode = mode
         self.pad = None
+        if mode != "solving":
+            self.auto = False
         self.rebuild_buttons()
 
     # ---------------------------------------------------------------- actions
@@ -176,8 +304,10 @@ class App:
 
     def clear_board(self):
         self.grid = logic.empty_grid()
+        self.problem = None
         self.givens = set()
         self.placed = set()
+        self.reverted = set()
         self.step = None
         self.reason = ()
         self.selected = None
@@ -191,26 +321,33 @@ class App:
         self.step = None
         self.reason = ()
         self.placed = set()
+        self.reverted = set()
         self.message = "Click a cell, pick a digit, then press <done>."
         self.set_mode("edit")
 
     def finish_edit(self):
-        self.givens = {i for i in range(logic.CELLS) if self.grid[i]}
         bad = logic.conflicts(self.grid)
         if bad:
             self.message = "Problem has conflicting digits -- fix them first."
             return
+        self.set_problem()
         self.selected = None
         self.message = "Problem set (%d clues). Press <solve>." % len(self.givens)
         self.set_mode("idle")
+
+    def set_problem(self):
+        """Remember the board as the problem to come back to on <reset>."""
+        self.problem = list(self.grid)
+        self.givens = {i for i in range(logic.CELLS) if self.grid[i]}
+        self.placed = set()
+        self.reverted = set()
 
     def generate(self):
         self.message = "Generating..."
         self.draw()
         pygame.display.flip()
         self.grid = logic.generate(self.rng)
-        self.givens = {i for i in range(logic.CELLS) if self.grid[i]}
-        self.placed = set()
+        self.set_problem()
         self.step = None
         self.reason = ()
         self.selected = None
@@ -224,8 +361,9 @@ class App:
         if logic.conflicts(self.grid):
             self.message = "Problem has conflicting digits -- fix them first."
             return
-        self.givens = {i for i in range(logic.CELLS) if self.grid[i]}
-        self.placed = set()
+        if self.problem is None:
+            self.set_problem()  # solving a board that was never declared a problem
+        self.reverted = set()
         self.step = None
         self.set_mode("solving")
         self.next_search()
@@ -250,11 +388,26 @@ class App:
         self.step = step
         self.reason = tuple(step.reason)
         self.selected = step.index
+        self.auto_at = pygame.time.get_ticks() + AUTO_DELAY
         r, c = logic.rc(step.index)
         self.message = "R%dC%d = %d  (%s, %d cells tried)" % (
             r + 1, c + 1, step.value, step.kind, len(visited),
         )
         self.rebuild_buttons()
+
+    def toggle_auto(self):
+        self.auto = not self.auto and self.mode == "solving"
+        if self.auto:
+            # a cell already on screen keeps its three seconds
+            self.auto_at = pygame.time.get_ticks() + (AUTO_DELAY if self.step else 0)
+        self.rebuild_buttons()
+
+    def tick_auto(self):
+        """Called every frame: run the next search once the pause is over."""
+        if not self.auto or self.mode != "solving" or self.dialog is not None:
+            return
+        if pygame.time.get_ticks() >= self.auto_at:
+            self.next_search()
 
     def start_user_solve(self):
         self.step = None
@@ -273,15 +426,100 @@ class App:
             self.set_mode("solving")
             self.next_search()
 
-    def abort(self):
+    def reset(self):
+        """Put the original problem back on the board."""
         self.step = None
         self.reason = ()
         self.selected = None
-        for i in self.placed:
-            self.grid[i] = 0
+        self.auto = False
+        if self.problem is None:
+            # nothing was ever recorded as the problem: leave the board alone
+            self.reverted = {i for i in range(logic.CELLS) if self.grid[i]}
+            self.message = "No original problem stored -- board kept as it is."
+            self.set_mode("idle")
+            return
+        # cells the solver or the user filled in go back to empty; they stay
+        # grey so it is clear they were not part of the problem
+        self.reverted = {
+            i for i in range(logic.CELLS) if self.grid[i] and not self.problem[i]
+        }
+        self.grid = list(self.problem)
+        self.givens = {i for i in range(logic.CELLS) if self.problem[i]}
         self.placed = set()
-        self.message = "Aborted. Edit or generate a problem."
+        self.message = "Back to the original problem (%d clues)." % len(self.givens)
         self.set_mode("idle")
+
+    # ------------------------------------------------------------ load / save
+    def puzzle_files(self):
+        if not PUZZLE_DIR.is_dir():
+            return []
+        return sorted(PUZZLE_DIR.glob("*" + PUZZLE_EXT))
+
+    def open_load(self):
+        self.auto = False
+        self.dialog = FileDialog("load", self.puzzle_files())
+
+    def open_save(self):
+        if not any(self.grid):
+            self.message = "Nothing to save -- the board is empty."
+            return
+        self.auto = False
+        files = self.puzzle_files()
+        self.dialog = FileDialog("save", files, name="puzzle%d" % (len(files) + 1))
+
+    def do_load(self, path):
+        try:
+            problem, grid = logic.parse(path.read_text())
+        except (OSError, ValueError) as exc:
+            self.message = "Could not load %s: %s" % (path.name, exc)
+            return
+        self.grid = grid
+        self.problem = problem
+        self.givens = {i for i in range(logic.CELLS) if problem[i]}
+        self.placed = {i for i in range(logic.CELLS) if grid[i] and not problem[i]}
+        self.reverted = set()
+        self.step = None
+        self.reason = ()
+        self.selected = None
+        clues = len(self.givens)
+        if logic.conflicts(self.grid):
+            self.message = "Loaded %s -- it has conflicting digits." % path.name
+        else:
+            self.message = "Loaded %s (%d clues)." % (path.name, clues)
+        self.set_mode("idle")
+
+    def do_save(self, name):
+        name = "".join(ch for ch in name.strip() if ch not in '/\\:*?"<>|')
+        if not name:
+            self.message = "Give the file a name first."
+            return False
+        path = PUZZLE_DIR / (name + PUZZLE_EXT)
+        problem = self.problem if self.problem is not None else list(self.grid)
+        try:
+            PUZZLE_DIR.mkdir(parents=True, exist_ok=True)
+            path.write_text(logic.dump(problem, self.grid))
+        except OSError as exc:
+            self.message = "Could not save: %s" % exc
+            return False
+        self.message = "Saved %s." % path.name
+        return True
+
+    def dialog_click(self, pos):
+        outcome = self.dialog.hit(pos)
+        if outcome is None:
+            return
+        if outcome[0] == "cancel":
+            self.dialog = None
+        elif outcome[0] == "ok":
+            if self.dialog.kind == "save":
+                if self.do_save(self.dialog.name):
+                    self.dialog = None
+            elif self.dialog.selected is not None:
+                path = self.dialog.selected
+                self.dialog = None
+                self.do_load(path)
+            else:
+                self.message = "Pick a file from the list."
 
     # ---------------------------------------------------------------- events
     def editable(self):
@@ -306,6 +544,9 @@ class App:
             self.set_mode("finish")
 
     def on_click(self, pos, button):
+        if self.dialog is not None:
+            self.dialog_click(pos)
+            return
         if self.pad is not None:
             value = self.pad.hit(pos)
             if value is not None:
@@ -324,10 +565,18 @@ class App:
 
     def on_key(self, event):
         if event.key == pygame.K_ESCAPE:
-            if self.pad is not None:
+            if self.dialog is not None:
+                self.dialog = None
+            elif self.pad is not None:
                 self.pad = None
             else:
                 self.running = False
+            return
+        if self.dialog is not None:
+            if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+                self.dialog_click(self.dialog.ok_rect.center)
+            else:
+                self.dialog.on_key(event)
             return
         target = self.pad.cell if self.pad else self.selected
         if target is None or not self.editable():
@@ -353,10 +602,21 @@ class App:
         self.draw_grid(mouse)
         for btn in self.buttons:
             btn.draw(self.screen, self.font, mouse)
+        y = self.buttons[-1].rect.bottom + 12
+        if self.auto:
+            left = max(0, self.auto_at - pygame.time.get_ticks())
+            note = "auto: next search in %.1fs" % (left / 1000.0)
+            self.screen.blit(self.font_small.render(note, True, PLACED), (PANEL_X, y))
+            y += 24
         if self.step is not None:
-            self.draw_wrapped(self.step.text, PANEL_X, MARGIN_Y + 5 * 54 + 10, 200)
+            y = self.draw_wrapped(self.step.text, PANEL_X, y, 200)
+            self.draw_wrapped(
+                "highlighted: %d cell(s)" % len(self.reason), PANEL_X, y + 6, 200
+            )
         if self.pad is not None:
             self.pad.draw(self.screen, self.font, self.font_small, mouse)
+        if self.dialog is not None:
+            self.dialog.draw(self.screen, self.font, self.font_small, mouse)
 
     def draw_grid(self, mouse):
         bad = logic.conflicts(self.grid)
@@ -370,6 +630,8 @@ class App:
                 fill = FOUND_BG
             elif i in reason:
                 fill = REASON_BG
+            elif i in self.reverted:
+                fill = RESET_BG
             elif i == self.selected:
                 fill = SEL_BG
             else:
@@ -377,7 +639,10 @@ class App:
             pygame.draw.rect(self.screen, fill, rect)
             value = self.grid[i]
             if value:
-                color = PLACED if i in self.placed else GIVEN
+                if i in self.reverted:
+                    color = THIN  # kept on the board but not part of the problem
+                else:
+                    color = PLACED if i in self.placed else GIVEN
                 glyph = self.font_big.render(str(value), True, color)
                 self.screen.blit(glyph, glyph.get_rect(center=rect.center))
 
@@ -390,6 +655,7 @@ class App:
             pygame.draw.line(self.screen, color, (MARGIN_X, y), (MARGIN_X + GRID, y), width)
 
     def draw_wrapped(self, text, x, y, width):
+        """Draw wrapped text; returns the y just below the last line."""
         words = text.split()
         line = ""
         for word in words:
@@ -402,6 +668,8 @@ class App:
                 line = probe
         if line:
             self.screen.blit(self.font_small.render(line, True, TEXT), (x, y))
+            y += 20
+        return y
 
     # ------------------------------------------------------------------ loop
     def run(self):
@@ -411,8 +679,12 @@ class App:
                     self.running = False
                 elif event.type == pygame.MOUSEBUTTONDOWN:
                     self.on_click(event.pos, event.button)
+                elif event.type == pygame.MOUSEWHEEL:
+                    if self.dialog is not None:
+                        self.dialog.scroll_by(-event.y)
                 elif event.type == pygame.KEYDOWN:
                     self.on_key(event)
+            self.tick_auto()
             self.draw()
             pygame.display.flip()
             self.clock.tick(60)
